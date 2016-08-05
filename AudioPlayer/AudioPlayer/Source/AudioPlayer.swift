@@ -36,6 +36,7 @@ class AudioPlayer: NSObject {
     private var fileLength: Int = 0
     private var seekByteOffset: Int = 0
     
+    
     private var lockQueue = dispatch_queue_create("AudioPlayer.LockQueue", nil)
     
     override init() {
@@ -87,21 +88,42 @@ class AudioPlayer: NSObject {
             assert(self.stream == nil)
             assert(self.audioURL == nil)
             
-            let message = CFHTTPMessageCreateRequest(nil, "GET", self.audioURL!, kCFHTTPVersion1_1).takeUnretainedValue()
+            
+            let urlSession = NSURLSession(configuration: NSURLSessionConfiguration.defaultSessionConfiguration(), delegate: self, delegateQueue: nil)
+            let dataRequest = NSURLRequest(URL: self.audioURL!)
             
             if self.fileLength > 0 && self.seekByteOffset > 0 {
-                CFHTTPMessageSetHeaderFieldValue(message, "Range", "bytes=\(self.seekByteOffset)-\(self.fileLength)")
+                dataRequest.setValue("bytes=\(self.seekByteOffset)-\(self.fileLength))", forKey: "Range")
             }
             
-//            self.stream = CFReadStreamCreateForHTTPRequest(nil, message).takeRetainedValue()
-//            
-//            if CFReadStreamSetProperty(self.stream, kCFStreamPropertyHTTPShouldAutoredirect, false) {
-//                
-//            }
+            let dataTask = urlSession.dataTaskWithRequest(dataRequest)
             
+            dataTask.resume()
         }
         
         return true
     }
     
+}
+
+extension AudioPlayer: NSURLSessionDataDelegate
+{
+    
+    func URLSession(session: NSURLSession, dataTask: NSURLSessionDataTask, didReceiveResponse response: NSURLResponse, completionHandler: (NSURLSessionResponseDisposition) -> Void) {
+        if self.fileLength != 0 {
+            return
+        }
+        
+        self.fileLength = Int(response.expectedContentLength) + self.seekByteOffset
+        
+    }
+    
+    func URLSession(session: NSURLSession, dataTask: NSURLSessionDataTask, didReceiveData data: NSData) {
+        self.seekByteOffset += data.length
+        print("currentLength\(self.seekByteOffset)-totalLength\(self.fileLength)")
+    }
+    
+    func URLSession(session: NSURLSession, task: NSURLSessionTask, didCompleteWithError error: NSError?) {
+        
+    }
 }
