@@ -82,24 +82,22 @@ class AudioPlayer: NSObject {
     }
     
     private func openReadStream() -> Bool {
-        dispatch_sync(lockQueue) {
-            [unowned self] in
-            assert(NSThread.currentThread().isEqual(self.playerThread))
-            assert(self.stream == nil)
-            assert(self.audioURL == nil)
-            
-            
-            let urlSession = NSURLSession(configuration: NSURLSessionConfiguration.defaultSessionConfiguration(), delegate: self, delegateQueue: nil)
-            let dataRequest = NSURLRequest(URL: self.audioURL!)
-            
-            if self.fileLength > 0 && self.seekByteOffset > 0 {
-                dataRequest.setValue("bytes=\(self.seekByteOffset)-\(self.fileLength))", forKey: "Range")
-            }
-            
-            let dataTask = urlSession.dataTaskWithRequest(dataRequest)
-            
-            dataTask.resume()
+        
+        assert(NSThread.currentThread().isEqual(self.playerThread))
+        assert(self.stream == nil)
+        assert(self.audioURL != nil)
+        
+        let urlSession = NSURLSession(configuration: NSURLSessionConfiguration.defaultSessionConfiguration(), delegate: self, delegateQueue: NSOperationQueue.mainQueue())
+        
+        let dataRequest = NSURLRequest(URL: self.audioURL!)
+        
+        if self.fileLength > 0 && self.seekByteOffset > 0 {
+            dataRequest.setValue("bytes=\(self.seekByteOffset)-\(self.fileLength))", forKey: "Range")
         }
+        
+        let dataTask = urlSession.dataTaskWithRequest(dataRequest)
+        
+        dataTask.resume()
         
         return true
     }
@@ -124,6 +122,6 @@ extension AudioPlayer: NSURLSessionDataDelegate
     }
     
     func URLSession(session: NSURLSession, task: NSURLSessionTask, didCompleteWithError error: NSError?) {
-        
+        print("\(error)")
     }
 }

@@ -14,7 +14,8 @@ class ViewController: UIViewController {
         super.viewDidLoad()
         // Do any additional setup after loading the view, typically from a nib.
         
-        let player = AudioPlayer()
+        let audioURL = NSURL(string: "https://archive.org/download/testmp3testfile/mpthreetest.mp3")!
+        let player = AudioPlayer(URL: audioURL)
         player.start()
     }
 
