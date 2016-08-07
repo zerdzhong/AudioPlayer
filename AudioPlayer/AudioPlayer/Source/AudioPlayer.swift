@@ -7,6 +7,7 @@
 //
 
 import Foundation
+import AudioToolbox
 
 enum AudioPlayerState {
     case initialized
@@ -35,7 +36,6 @@ class AudioPlayer: NSObject {
     private var stream: CFReadStreamRef?
     private var fileLength: Int = 0
     private var seekByteOffset: Int = 0
-    
     
     private var lockQueue = dispatch_queue_create("AudioPlayer.LockQueue", nil)
     
@@ -123,5 +123,43 @@ extension AudioPlayer: NSURLSessionDataDelegate
     
     func URLSession(session: NSURLSession, task: NSURLSessionTask, didCompleteWithError error: NSError?) {
         print("\(error)")
+    }
+}
+
+extension AudioPlayer
+{
+    private func hintForFileExtension(fileExtension: String) -> AudioFileTypeID {
+        var fileTypeHint: AudioFileTypeID = kAudioFileAAC_ADTSType;
+        
+        switch fileExtension {
+        case "mp3":
+            fileTypeHint = kAudioFileMP3Type;
+            break
+        case "wav":
+            fileTypeHint = kAudioFileWAVEType;
+            break
+        case "aifc":
+            fileTypeHint = kAudioFileAIFCType;
+            break
+        case "aiff":
+            fileTypeHint = kAudioFileAIFFType;
+            break
+        case "m4a":
+            fileTypeHint = kAudioFileM4AType;
+            break
+        case "mp4":
+            fileTypeHint = kAudioFileMPEG4Type;
+            break
+        case "caf":
+            fileTypeHint = kAudioFileCAFType;
+            break
+        case "aac":
+            fileTypeHint = kAudioFileAAC_ADTSType;
+            break
+        default:
+            break
+        }
+        
+        return fileTypeHint;
     }
 }
