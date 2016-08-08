@@ -37,6 +37,8 @@ class AudioPlayer: NSObject {
     private var fileLength: Int = 0
     private var seekByteOffset: Int = 0
     
+    private var audioFileStreamID: AudioFileStreamID = nil
+    
     private var lockQueue = dispatch_queue_create("AudioPlayer.LockQueue", nil)
     
     override init() {
@@ -87,7 +89,7 @@ class AudioPlayer: NSObject {
         assert(self.stream == nil)
         assert(self.audioURL != nil)
         
-        let urlSession = NSURLSession(configuration: NSURLSessionConfiguration.defaultSessionConfiguration(), delegate: self, delegateQueue: NSOperationQueue.mainQueue())
+        let urlSession = NSURLSession(configuration: NSURLSessionConfiguration.defaultSessionConfiguration(), delegate: self, delegateQueue: nil)
         
         let dataRequest = NSURLRequest(URL: self.audioURL!)
         
@@ -102,27 +104,54 @@ class AudioPlayer: NSObject {
         return true
     }
     
+    private func setupAudioFileStream() {
+        if audioFileStreamID != nil {
+            return
+        }
+        
+        assert(self.audioURL != nil)
+            
+        if let fileExtension = self.audioURL?.pathExtension {
+            let fileType = self.hintForFileExtension(fileExtension)
+            
+            let selfPointer = unsafeBitCast(self, UnsafeMutablePointer<Void>.self)
+            let err = AudioFileStreamOpen(selfPointer, AudioFileStreamPropertyListener, AudioFileStreamPacketsCallback, fileType, &self.audioFileStreamID)
+            
+            if err != 0 {
+                print("audio file stream create error:\(err)")
+            }
+        }
+    }
+    
 }
 
 extension AudioPlayer: NSURLSessionDataDelegate
 {
     
     func URLSession(session: NSURLSession, dataTask: NSURLSessionDataTask, didReceiveResponse response: NSURLResponse, completionHandler: (NSURLSessionResponseDisposition) -> Void) {
+        
+        completionHandler(.Allow)
+        
         if self.fileLength != 0 {
             return
         }
         
         self.fileLength = Int(response.expectedContentLength) + self.seekByteOffset
         
+        print("receive response, file length:\(self.fileLength)")
     }
     
     func URLSession(session: NSURLSession, dataTask: NSURLSessionDataTask, didReceiveData data: NSData) {
         self.seekByteOffset += data.length
-        print("currentLength\(self.seekByteOffset)-totalLength\(self.fileLength)")
+        print("currentLength:\(self.seekByteOffset)-totalLength:\(self.fileLength)")
+        
+        setupAudioFileStream()
+        
+        AudioFileStreamParseBytes(self.audioFileStreamID, UInt32(data.length), data.bytes, AudioFileStreamParseFlags(rawValue: 0))
     }
     
     func URLSession(session: NSURLSession, task: NSURLSessionTask, didCompleteWithError error: NSError?) {
-        print("\(error)")
+        print("session error:\(error)")
     }
 }
 
@@ -162,4 +191,12 @@ extension AudioPlayer
         
         return fileTypeHint;
     }
+}
+
+func AudioFileStreamPropertyListener(clientData: UnsafeMutablePointer<Void>, audioFileStream: AudioFileStreamID, propertyID: AudioFileStreamPropertyID, ioFlag: UnsafeMutablePointer<AudioFileStreamPropertyFlags>) {
+    
+}
+
+func AudioFileStreamPacketsCallback(clientData: UnsafeMutablePointer<Void>, numberBytes: UInt32, numberPackets: UInt32, ioData: UnsafePointer<Void>, packetDescription: UnsafeMutablePointer<AudioStreamPacketDescription>) {
+    
 }
