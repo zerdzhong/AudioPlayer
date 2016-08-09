@@ -27,6 +27,9 @@ enum AudioPlayerError: ErrorType {
     case audioDataNotFound
 }
 
+let kAQDefaultBufSize: UInt32 = 2048
+let kNumberBuffers: Int = 3
+
 class AudioPlayer: NSObject {
     
     var audioURL: NSURL?
@@ -37,10 +40,16 @@ class AudioPlayer: NSObject {
     private var fileLength: Int = 0
     private var seekByteOffset: Int = 0
     
+    //MARK: - Audio propertys
     private var audioFileStreamID: AudioFileStreamID = nil
+    private var audioBaseDescription = AudioStreamBasicDescription()
+    private var audioQueue: AudioQueueRef = nil
+    private var packetBufferSize: UInt32 = 0
+    private var audioQueueBuffers = Array<AudioQueueBufferRef>(count: kNumberBuffers, repeatedValue: nil)
     
     private var lockQueue = dispatch_queue_create("AudioPlayer.LockQueue", nil)
     
+    //MARK:- life cycle
     override init() {
         state = .initialized
         super.init()
@@ -52,6 +61,7 @@ class AudioPlayer: NSObject {
         audioURL = URL
     }
     
+    //MARK: - public func
     func start() -> Void {
         if state == .initialized {
             state = .startingThread
@@ -62,6 +72,7 @@ class AudioPlayer: NSObject {
         }
     }
     
+    //MARK: - private func
     @objc private func startPlayerThread() {
         
         dispatch_sync(lockQueue) {
@@ -123,8 +134,51 @@ class AudioPlayer: NSObject {
         }
     }
     
+    private func setupAudioQueue() {
+        
+        var status: OSStatus = 0
+        
+        let inUserPointer = unsafeBitCast(self, UnsafeMutablePointer<Void>.self)
+        status = AudioQueueNewOutput(&audioBaseDescription, AudioQueueOutputCallback, inUserPointer, nil, nil, 0, &audioQueue)
+        assert(noErr == status)
+        
+        status = AudioQueueAddPropertyListener(audioQueue, kAudioQueueProperty_IsRunning, AudioQueueRunningListener, inUserPointer)
+        assert(noErr == status)
+        
+        var propertySize = UInt32(sizeof(UInt32))
+        
+        status = AudioFileStreamGetProperty(audioFileStreamID, kAudioFilePropertyPacketSizeUpperBound, &propertySize, &packetBufferSize)
+        assert(noErr == status)
+        
+        if packetBufferSize == 0 {
+            status = AudioFileStreamGetProperty(audioFileStreamID, kAudioFileStreamProperty_MaximumPacketSize, &propertySize, &packetBufferSize)
+            if noErr == status && packetBufferSize == 0 {
+                packetBufferSize = kAQDefaultBufSize
+            }
+        }
+        
+        for index in 0..<kNumberBuffers {
+            status = AudioQueueAllocateBuffer(audioQueue, packetBufferSize, &audioQueueBuffers[index])
+            assert(noErr == status)
+        }
+        
+        var cookieSize = UInt32(sizeof(UInt32))
+        
+        let couldNotGetProperty = (AudioFileStreamGetPropertyInfo(audioFileStreamID, kAudioFilePropertyMagicCookieData, &cookieSize, nil) == 0)
+        
+        if !couldNotGetProperty && cookieSize > 0 {
+            let magicCookie = UnsafeMutablePointer<Void>(malloc(Int(cookieSize)))
+            
+            AudioFileStreamGetProperty(audioFileStreamID, kAudioFileStreamProperty_MagicCookieData, &cookieSize, magicCookie)
+            AudioQueueSetProperty(audioFileStreamID, kAudioQueueProperty_MagicCookie, magicCookie, cookieSize)
+            
+            free(magicCookie)
+        }
+    }
+    
 }
 
+//MARK: - AudioPlayer urlSession delegate
 extension AudioPlayer: NSURLSessionDataDelegate
 {
     
@@ -193,10 +247,20 @@ extension AudioPlayer
     }
 }
 
+//MARK: - AudioFileStream callback
+
 func AudioFileStreamPropertyListener(clientData: UnsafeMutablePointer<Void>, audioFileStream: AudioFileStreamID, propertyID: AudioFileStreamPropertyID, ioFlag: UnsafeMutablePointer<AudioFileStreamPropertyFlags>) {
     
 }
 
 func AudioFileStreamPacketsCallback(clientData: UnsafeMutablePointer<Void>, numberBytes: UInt32, numberPackets: UInt32, ioData: UnsafePointer<Void>, packetDescription: UnsafeMutablePointer<AudioStreamPacketDescription>) {
     
+}
+
+//MARK: - AudioQueue callback
+func AudioQueueOutputCallback(clientData: UnsafeMutablePointer<Void>, AQ: AudioQueueRef, buffer: AudioQueueBufferRef) {
+
+}
+
+func AudioQueueRunningListener(clientData: UnsafeMutablePointer<Void>, AQ: AudioQueueRef, propertyID: AudioQueuePropertyID) {
 }
