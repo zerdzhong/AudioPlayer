@@ -13,6 +13,8 @@ enum AudioPlayerState {
     case initialized
     case startingThread
     case waitingForData
+    case flushingEoF
+    case watingForQueueStart
     case playing
     case buffing
     case stopping
@@ -29,6 +31,7 @@ enum AudioPlayerError: ErrorType {
 
 let kAQDefaultBufSize: UInt32 = 2048
 let kNumberBuffers: Int = 3
+let kAQMaxPacketDescs: Int = 512
 
 class AudioPlayer: NSObject {
     
@@ -46,6 +49,15 @@ class AudioPlayer: NSObject {
     private var audioQueue: AudioQueueRef = nil
     private var packetBufferSize: UInt32 = 0
     private var audioQueueBuffers = Array<AudioQueueBufferRef>(count: kNumberBuffers, repeatedValue: nil)
+    
+    private var packetDescs = Array<AudioStreamPacketDescription>(count: kAQMaxPacketDescs, repeatedValue: AudioStreamPacketDescription())
+    private var packetsFilled: UInt32 = 0
+    private var bytesFilled: UInt32 = 0
+    private var inUse = Array<Bool>(count: kNumberBuffers, repeatedValue: false)
+    private var fillBufferIndex: Int = 0
+    private var bufferUsed: Int = 0
+    private var audioDataByteCount: Int = 0
+    private var dataOffset: Int = 0
     
     private var lockQueue = dispatch_queue_create("AudioPlayer.LockQueue", nil)
     
@@ -88,7 +100,7 @@ class AudioPlayer: NSObject {
             var isRunning = true
             
             while isRunning {
-                print("running...")
+//                print("running...")
                 isRunning = NSRunLoop.currentRunLoop().runMode(NSDefaultRunLoopMode, beforeDate: NSDate(timeIntervalSinceNow: 0.25))
             }
         }
@@ -126,15 +138,19 @@ class AudioPlayer: NSObject {
             let fileType = self.hintForFileExtension(fileExtension)
             
             let selfPointer = unsafeBitCast(self, UnsafeMutablePointer<Void>.self)
-            let err = AudioFileStreamOpen(selfPointer, AudioFileStreamPropertyListener, AudioFileStreamPacketsCallback, fileType, &self.audioFileStreamID)
+            let status = AudioFileStreamOpen(selfPointer, AudioFileStreamPropertyListener, AudioFileStreamPacketsCallback, fileType, &self.audioFileStreamID)
             
-            if err != 0 {
-                print("audio file stream create error:\(err)")
+            if noErr != status {
+                print("audio file stream create error:\(status)")
             }
         }
     }
     
     private func setupAudioQueue() {
+        
+        if audioQueue != nil {
+            return
+        }
         
         var status: OSStatus = 0
         
@@ -148,11 +164,10 @@ class AudioPlayer: NSObject {
         var propertySize = UInt32(sizeof(UInt32))
         
         status = AudioFileStreamGetProperty(audioFileStreamID, kAudioFilePropertyPacketSizeUpperBound, &propertySize, &packetBufferSize)
-        assert(noErr == status)
         
-        if packetBufferSize == 0 {
+        if noErr != status || packetBufferSize == 0 {
             status = AudioFileStreamGetProperty(audioFileStreamID, kAudioFileStreamProperty_MaximumPacketSize, &propertySize, &packetBufferSize)
-            if noErr == status && packetBufferSize == 0 {
+            if noErr != status || packetBufferSize == 0 {
                 packetBufferSize = kAQDefaultBufSize
             }
         }
@@ -173,6 +188,166 @@ class AudioPlayer: NSObject {
             AudioQueueSetProperty(audioFileStreamID, kAudioQueueProperty_MagicCookie, magicCookie, cookieSize)
             
             free(magicCookie)
+        }
+    }
+    
+    private func enqueueBuffer() {
+        
+        print("enqueue buffer")
+        
+        inUse[fillBufferIndex] = true
+        bufferUsed += 1
+        
+        let fillBuffer = audioQueueBuffers[fillBufferIndex]
+        fillBuffer.memory.mAudioDataByteSize = bytesFilled
+        
+        var status: OSStatus = 0
+        
+        if packetsFilled > 0 {
+            status = AudioQueueEnqueueBuffer(audioQueue, fillBuffer, packetsFilled, packetDescs)
+        } else {
+            status = AudioQueueEnqueueBuffer(audioQueue, fillBuffer, 0, nil)
+        }
+        
+        if noErr != status {
+            print("AudioQueue enqueue error")
+            return
+        }
+        
+        if state == .buffing || state == .waitingForData || state == .flushingEoF {
+            if state == .flushingEoF || bufferUsed == kNumberBuffers - 1 {
+                if state == .buffing {
+                    status = AudioQueueStart(audioQueue, nil)
+                    assert(noErr == status)
+                    state = .playing
+                } else {
+                    state = .watingForQueueStart
+                    
+                    status = AudioQueueStart(audioQueue, nil)
+                    assert(noErr == status)
+                }
+            }
+        }
+        
+        fillBufferIndex += 1
+        
+        if fillBufferIndex >= kNumberBuffers {
+            fillBufferIndex = 0
+        }
+        
+        bytesFilled = 0
+        packetsFilled = 0
+    }
+    
+    //MARK: -
+    
+    private func handleAudioPackets(numberOfPackets: UInt32, numberOfBytes: UInt32, data: UnsafePointer<Void>, packetDescription: UnsafeMutablePointer<AudioStreamPacketDescription>) {
+        print("handle audio packets")
+        
+        if audioQueue == nil {
+            setupAudioQueue()
+        }
+        
+        if packetDescription != nil {
+            for index: Int in 0..<Int(numberOfPackets) {
+                let packetOffset = packetDescription.advancedBy(index).memory.mStartOffset
+                let packetSize = packetDescription.advancedBy(index).memory.mDataByteSize
+                
+                let remainSpace = packetBufferSize - bytesFilled
+                
+                if remainSpace < packetSize {
+                    enqueueBuffer()
+                }
+                
+                if bytesFilled + packetSize > packetBufferSize {
+                    return
+                }
+                
+                let fillBuffer = audioQueueBuffers[fillBufferIndex]
+                memcpy(fillBuffer.advancedBy(Int(bytesFilled)), data.advancedBy(Int(packetOffset)), Int(packetSize))
+                
+                packetDescs[Int(packetsFilled)] = packetDescription.advancedBy(index).memory
+                packetDescs[Int(packetsFilled)].mStartOffset = Int64(bytesFilled)
+                
+                bytesFilled += packetSize
+                packetsFilled += 1
+            }
+            
+            if kAQMaxPacketDescs - Int(packetsFilled) == 0{
+                enqueueBuffer()
+            }
+        } else {
+            
+        }
+    }
+    
+    private func handlePropertyChange(audioFileStream: AudioFileStreamID, fileStreamPropertyID: AudioFileStreamPropertyID, ioFlags: UnsafeMutablePointer<AudioFileStreamPropertyFlags>) {
+        print("audio file stream property change")
+        
+        if fileStreamPropertyID == kAudioFileStreamProperty_ReadyToProducePackets {
+            
+        } else if fileStreamPropertyID == kAudioFileStreamProperty_DataOffset {
+            
+            var offset: Int = 0
+            var offsetSize = UInt32(sizeof(UInt64))
+            let status = AudioFileStreamGetProperty(audioFileStream, kAudioFileStreamProperty_DataOffset, &offsetSize, &offset)
+            
+            if noErr == status {
+                return
+            }
+            
+            dataOffset = offset
+            
+            if audioDataByteCount > 0 {
+                fileLength = dataOffset + audioDataByteCount
+            }
+            
+        } else if fileStreamPropertyID == kAudioFileStreamProperty_AudioDataByteCount {
+            
+            var byteCountSize = UInt32(sizeof(UInt64))
+            AudioFileStreamGetProperty(audioFileStream, kAudioFileStreamProperty_AudioDataByteCount, &byteCountSize, &audioDataByteCount)
+            
+            fileLength = dataOffset + audioDataByteCount
+            
+        } else if fileStreamPropertyID == kAudioFileStreamProperty_DataFormat {
+            if audioBaseDescription.mSampleRate == 0 {
+                var dataFormatSize = UInt32(sizeof(AudioStreamBasicDescription))
+                let status = AudioFileStreamGetProperty(audioFileStream, kAudioFileStreamProperty_DataFormat, &dataFormatSize, &audioBaseDescription)
+                assert(noErr == status)
+            }
+        } else if fileStreamPropertyID == kAudioFileStreamProperty_FormatList {
+            
+            var outWriteable: Bool = false
+            var formatListSize = UInt32(sizeof(Bool))
+            
+            var status = AudioFileStreamGetProperty(audioFileStream, kAudioFileStreamProperty_FormatList, &formatListSize, &outWriteable)
+            
+            assert(noErr == status)
+            
+            let formatList = UnsafeMutablePointer<AudioFormatListItem>(malloc(Int(formatListSize)))
+            
+            status = AudioFileStreamGetProperty(audioFileStream, kAudioFileStreamProperty_FormatList, &formatListSize, formatList)
+            
+            if noErr != status {
+                free(formatList)
+                return
+            }
+            
+            var index: UInt32 = 0
+            
+            while index * UInt32(sizeof(AudioFormatListItem)) < formatListSize {
+                let streamDesc = formatList.advancedBy(Int(index)).memory.mASBD
+                
+                if streamDesc.mFormatID == kAudioFormatMPEG4AAC_HE || streamDesc.mFormatID == kAudioFormatMPEG4AAC_HE_V2 {
+                    audioBaseDescription = streamDesc
+                    break
+                }
+                
+                free(formatList)
+                
+                index += UInt32(sizeof(AudioFormatListItem))
+            }
+            
         }
     }
     
@@ -250,16 +425,19 @@ extension AudioPlayer
 //MARK: - AudioFileStream callback
 
 func AudioFileStreamPropertyListener(clientData: UnsafeMutablePointer<Void>, audioFileStream: AudioFileStreamID, propertyID: AudioFileStreamPropertyID, ioFlag: UnsafeMutablePointer<AudioFileStreamPropertyFlags>) {
-    
+    let this = Unmanaged<AudioPlayer>.fromOpaque(COpaquePointer(clientData)).takeUnretainedValue()
+    this.handlePropertyChange(audioFileStream, fileStreamPropertyID: propertyID, ioFlags: ioFlag)
 }
 
 func AudioFileStreamPacketsCallback(clientData: UnsafeMutablePointer<Void>, numberBytes: UInt32, numberPackets: UInt32, ioData: UnsafePointer<Void>, packetDescription: UnsafeMutablePointer<AudioStreamPacketDescription>) {
     
+    let this = Unmanaged<AudioPlayer>.fromOpaque(COpaquePointer(clientData)).takeUnretainedValue()
+    this.handleAudioPackets(numberPackets, numberOfBytes: numberBytes, data: ioData, packetDescription: packetDescription)
 }
 
 //MARK: - AudioQueue callback
 func AudioQueueOutputCallback(clientData: UnsafeMutablePointer<Void>, AQ: AudioQueueRef, buffer: AudioQueueBufferRef) {
-
+    
 }
 
 func AudioQueueRunningListener(clientData: UnsafeMutablePointer<Void>, AQ: AudioQueueRef, propertyID: AudioQueuePropertyID) {
