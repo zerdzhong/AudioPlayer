@@ -8,6 +8,7 @@
 
 import Foundation
 import AudioToolbox
+import AVFoundation
 
 enum AudioPlayerState {
     case initialized
@@ -94,6 +95,13 @@ class AudioPlayer: NSObject {
                 self.state = .initialized
                 return;
             }
+            
+            do {
+                try AVAudioSession.sharedInstance().setActive(true)
+            } catch let error as NSError {
+                print("AVAudioSession set active error\(error)")
+            }
+            
             
             self.openReadStream()
             
@@ -380,7 +388,9 @@ extension AudioPlayer: NSURLSessionDataDelegate
     }
     
     func URLSession(session: NSURLSession, task: NSURLSessionTask, didCompleteWithError error: NSError?) {
-        print("session error:\(error)")
+        if let err = error {
+            print("session error:\(err)")
+        }
     }
 }
 
