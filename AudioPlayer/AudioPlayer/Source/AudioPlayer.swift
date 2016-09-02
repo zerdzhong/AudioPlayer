@@ -43,6 +43,7 @@ class AudioPlayer: NSObject {
     private var stream: CFReadStreamRef?
     private var fileLength: Int = 0
     private var seekByteOffset: Int = 0
+    private var httpHeaders: NSDictionary?
     
     //MARK: - Audio propertys
     private var audioFileStreamID: AudioFileStreamID = nil
@@ -120,17 +121,36 @@ class AudioPlayer: NSObject {
         assert(self.stream == nil)
         assert(self.audioURL != nil)
         
-        let urlSession = NSURLSession(configuration: NSURLSessionConfiguration.defaultSessionConfiguration(), delegate: self, delegateQueue: nil)
-        
-        let dataRequest = NSURLRequest(URL: self.audioURL!)
+        let message = CFHTTPMessageCreateRequest(nil, "GET", self.audioURL!, kCFHTTPVersion1_1).takeUnretainedValue()
         
         if self.fileLength > 0 && self.seekByteOffset > 0 {
-            dataRequest.setValue("bytes=\(self.seekByteOffset)-\(self.fileLength))", forKey: "Range")
+            CFHTTPMessageSetHeaderFieldValue(message, "bytes=\(self.seekByteOffset)-\(self.fileLength))", "Range")
+            print("bytes=\(self.seekByteOffset)-\(self.fileLength))")
         }
         
-        let dataTask = urlSession.dataTaskWithRequest(dataRequest)
+        stream = CFReadStreamCreateForHTTPRequest(nil, message).takeRetainedValue()
         
-        dataTask.resume()
+        assert(stream != nil)
+        
+        if CFReadStreamSetProperty(stream!, kCFStreamPropertyHTTPShouldAutoredirect, kCFBooleanTrue) == false {
+            return false
+        }
+        
+        let proxySetting = CFNetworkCopySystemProxySettings()?.takeUnretainedValue()
+        CFReadStreamSetProperty(stream!, kCFStreamPropertyHTTPProxy, proxySetting)
+        
+        state = .waitingForData
+        
+        if !CFReadStreamOpen(stream!) {
+            return false
+        }
+        
+        var context = CFStreamClientContext()
+        context.info = unsafeBitCast(self, UnsafeMutablePointer<Void>.self)
+        
+        CFReadStreamSetClient(stream!, CFStreamEventType.HasBytesAvailable.rawValue | CFStreamEventType.ErrorOccurred.rawValue | CFStreamEventType.EndEncountered.rawValue, ReadStreamCallBack, &context)
+        
+        CFReadStreamScheduleWithRunLoop(stream!, CFRunLoopGetCurrent(), kCFRunLoopCommonModes)
         
         return true
     }
@@ -359,39 +379,54 @@ class AudioPlayer: NSObject {
         }
     }
     
-}
-
-//MARK: - AudioPlayer urlSession delegate
-extension AudioPlayer: NSURLSessionDataDelegate
-{
-    
-    func URLSession(session: NSURLSession, dataTask: NSURLSessionDataTask, didReceiveResponse response: NSURLResponse, completionHandler: (NSURLSessionResponseDisposition) -> Void) {
-        
-        completionHandler(.Allow)
-        
-        if self.fileLength != 0 {
+    private func handleReadFormStream(aStream: CFReadStreamRef, eventType: CFStreamEventType) {
+        if let stream = self.stream where stream !== aStream {
             return
         }
         
-        self.fileLength = Int(response.expectedContentLength) + self.seekByteOffset
-        
-        print("receive response, file length:\(self.fileLength)")
-    }
-    
-    func URLSession(session: NSURLSession, dataTask: NSURLSessionDataTask, didReceiveData data: NSData) {
-        self.seekByteOffset += data.length
-        print("currentLength:\(self.seekByteOffset)-totalLength:\(self.fileLength)")
-        
-        setupAudioFileStream()
-        
-        AudioFileStreamParseBytes(self.audioFileStreamID, UInt32(data.length), data.bytes, AudioFileStreamParseFlags(rawValue: 0))
-    }
-    
-    func URLSession(session: NSURLSession, task: NSURLSessionTask, didCompleteWithError error: NSError?) {
-        if let err = error {
-            print("session error:\(err)")
+        switch eventType {
+        case CFStreamEventType.HasBytesAvailable:
+            
+            if httpHeaders == nil {
+                let message = CFReadStreamCopyProperty(aStream, kCFStreamPropertyHTTPResponseHeader) as! CFHTTPMessageRef
+                
+                if let dictionary = CFHTTPMessageCopyAllHeaderFields(message)?.takeUnretainedValue() as NSDictionary? {
+                    httpHeaders = dictionary
+                    
+                    if seekByteOffset == 0 {
+                        fileLength = (httpHeaders?.objectForKey("Content-Length")?.integerValue)!
+                    }
+                }
+                
+            }
+            
+            setupAudioFileStream()
+            
+            var data = [UInt8]()
+            
+            dispatch_sync(dispatch_queue_create("AudioPlayer.LockQueue.ReadStream", nil)) {
+                if !CFReadStreamHasBytesAvailable(aStream) {
+                    return
+                }
+                
+                let length = CFReadStreamRead(aStream, &data, Int(kAQDefaultBufSize))
+                
+                if length == -1 || length == 0 {
+                    return
+                }
+                
+                AudioFileStreamParseBytes(self.audioFileStreamID, UInt32(length), data, AudioFileStreamParseFlags(rawValue: 0))
+            }
+            
+//            self.seekByteOffset += length
+            print("currentLength:\(seekByteOffset)-totalLength:\(fileLength)")
+            
+            break
+        default:
+            break
         }
     }
+    
 }
 
 extension AudioPlayer
@@ -430,6 +465,14 @@ extension AudioPlayer
         
         return fileTypeHint;
     }
+}
+
+//MARK:- CFReadStream callback
+
+func ReadStreamCallBack(stream: CFReadStream!, eventType: CFStreamEventType, clientData: UnsafeMutablePointer<Void>) -> Void
+{
+    let this = Unmanaged<AudioPlayer>.fromOpaque(COpaquePointer(clientData)).takeUnretainedValue()
+    this.handleReadFormStream(stream, eventType: eventType)
 }
 
 //MARK: - AudioFileStream callback
